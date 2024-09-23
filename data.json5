@@ -1,0 +1,44 @@
+{
+	schemas: {
+		Field: {
+			fields: {
+				name: { template: "${FIELD.name}" },
+				value: { template: "${FIELD.value}" },
+			},
+		},
+		Person: {
+			fields: {
+				id: { template: "${this.id::UUID}", },
+				name: { template: "${FULL_NAME}" },
+				risk: { template: "${1..100}" },
+				fields: { items: { schema: "Field" } },
+			},
+		},
+		Campaign: {
+			fields: {
+				id: { template: "${this.id::UUID}", },
+				name: { template: "My ${ADJECTIVE} campaign" },
+			},
+		},
+	},
+	routes: {
+		"/campaigns": {
+			response: { schema: "Campaign[]", },
+			routes: {
+				"/:id": {
+					response: { schema: "Campaign", },
+					routes: {
+						"/certificants": {
+							response: { schema: "Person[]", },
+							routes: {
+								"/:id": {
+									response: { schema: "Person", },
+								},
+							},
+						},
+					}
+				},
+			},
+		},
+	}
+}
