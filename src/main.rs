@@ -2,11 +2,10 @@ use std::{collections::HashMap, hash::{Hash, Hasher}};
 
 use server_nano::Server;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Field {
 	name: String,
-	ty: String,
-	builder: Vec<TemplatePieces>,
+	datatype: DataTypes,
 }
 
 #[derive(Debug, Clone)]
@@ -18,24 +17,66 @@ struct Schema {
 #[derive(Debug, Clone)]
 struct Route {
 	name: String,
-	response: String,
+	response: DataTypes,
 }
 
-fn ingest_routes(value: &serde_json::Value, routes: &mut HashMap<String, Route>, parent: String) {
-	if let Some(jroutes) = value.get("routes") {
-		for (route_name, route) in jroutes.as_object().unwrap() {
-			let response = route.get("response").unwrap().as_object().unwrap().get("schema").unwrap().as_str().unwrap().to_string();
+fn ingest_routes(value: &serde_json::Value) -> HashMap<String, Route> {
+	fn ingest_routes_internal(value: &serde_json::Value, routes: &mut HashMap<String, Route>, parent: String) {
+		if let Some(jroutes) = value.get("routes") {
+			for (route_name, route) in jroutes.as_object().unwrap() {
+				let response = match route.get("response") {
+					Some(serde_json::Value::String(response)) => {
+						if response.contains("[]") {
+							let response = response.replace("[]", "");
+							DataTypes::Array(ObjectExpressions::Schema(response))
+						} else {
+							DataTypes::Object(ObjectExpressions::Schema(response.clone()))
+						}
+					},
+					Some(serde_json::Value::Object(response)) => {
+						match response.get("schema") {
+							Some(serde_json::Value::String(response)) => {
+								if response.contains("[]") {
+									let response = response.replace("[]", "");
+									DataTypes::Array(ObjectExpressions::Schema(response))
+								} else {
+									DataTypes::Object(ObjectExpressions::Schema(response.clone()))
+								}
+							}
+							Some(serde_json::Value::Object(schema)) => {
+								if let Some(serde_json::Value::Object(items)) = schema.get("items") {
+									if let Some(serde_json::Value::Object(schema)) = items.get("schema") {
+										DataTypes::Array(ObjectExpressions::Object(ingest_schema(schema)))
+									} else {
+										DataTypes::Null
+									}
+								} else {
+									DataTypes::Object(ObjectExpressions::Object(ingest_schema(schema)))
+								}
+							}
+							_ => DataTypes::Null,
+						}
+					},
+					_ => DataTypes::Null,
+				};
 
-			let r = format!("{}{}", parent, route_name);
+				let r = format!("{}{}", parent, route_name);
 
-			routes.insert(r.clone(), Route {
-				name: r.clone(),
-				response,
-			});
+				routes.insert(r.clone(), Route {
+					name: r.clone(),
+					response,
+				});
 
-			ingest_routes(route, routes, r);
+				ingest_routes_internal(route, routes, r);
+			}
 		}
 	}
+
+	let mut routes = HashMap::new();
+
+	ingest_routes_internal(value, &mut routes, "".to_string());
+
+	routes
 }
 
 struct FakeField {
@@ -103,12 +144,31 @@ const ADJECTIVES: [&str; 12] = [
 	"lame",
 ];
 
+const ROLES: [&str; 12] = [
+	"superadmin",
+	"admin",
+	"editor",
+	"author",
+	"contributor",
+	"subscriber",
+	"customer",
+	"guest",
+	"visitor",
+	"banned",
+	"pending",
+	"deleted",
+];
+
 fn get_fake_name(seed: usize) -> &'static str {
 	FAKE_FIRST_NAMES[seed % FAKE_FIRST_NAMES.len()]
 }
 
 fn get_fake_last_name(seed: usize) -> &'static str {
 	FAKE_LAST_NAMES[seed % FAKE_LAST_NAMES.len()]
+}
+
+fn get_fake_role(seed: usize) -> &'static str {
+	ROLES[seed % ROLES.len()]
 }
 
 fn get_fake_full_name(seed: usize) -> String {
@@ -131,97 +191,244 @@ fn get_fake_uuidv4(seed: usize) -> String {
 	format!("{}{}{}{}{}{}{}{}-{}{}{}{}-4{}{}{}-{}{}{}{}{}{}{}{}{}{}{}{}", hex_char(seed + 0), hex_char(seed + 18), hex_char(seed + 3), hex_char(seed + 99), hex_char(seed + 2), hex_char(seed + 18), hex_char(seed + 6), hex_char(seed + 7), hex_char(seed + 19), hex_char(seed + 9), hex_char(seed + 36), hex_char(seed + 23), hex_char(seed + 12), hex_char(seed + 11), hex_char(seed + 14), hex_char(seed + 15), hex_char(seed + 13), hex_char(seed + 17), hex_char(seed + 12), hex_char(seed + 9), hex_char(seed + 20), hex_char(seed + 21), hex_char(seed + 22), hex_char(seed + 5), hex_char(seed + 24), hex_char(seed + 25), hex_char(seed + 16))
 }
 
-fn build_object(schemas: &HashMap<String, Schema>, schema: &Schema, id: &str, seed: usize) -> serde_json::Value {
-	let mut obj = serde_json::value::Map::new();
+struct Context {
+	id: Option<String>,
+	seed: usize,
+	size: usize,
+}
 
-	let hashed_key: usize = {
+fn build_value(schemas: &HashMap<String, Schema>, datatype: &DataTypes, ctx: &Context) -> serde_json::Value {
+	let hashed_key = if let Some(id) = ctx.id.as_ref() {
 		let mut hasher = std::collections::hash_map::DefaultHasher::new();
 		id.hash(&mut hasher);
-		(hasher.finish() as usize).wrapping_add(seed)
+		(hasher.finish() as usize).wrapping_add(ctx.seed)
+	} else {
+		ctx.seed
 	};
 
-	schema.fields.iter().for_each(|field| {
-		let val = match field.ty.as_str() {
-			"String" => {
-				let mut res_string = String::new();
-				for tp in &field.builder {
-					match tp {
-						TemplatePieces::String(s) => {
-							res_string.push_str(&s);
-						},
-						TemplatePieces::Range(min, max) => {
-							let val = min + (hashed_key as i64 % (max - min));
-							res_string.push_str(&val.to_string());
-						},
-						TemplatePieces::Variable(s) => {
-							match s.as_str() {
-								"FULL_NAME" => {
-									res_string.push_str(get_fake_full_name(hashed_key).as_str());
-								},
-								"FIELD.name" => {
-									let name = FIELDS[hashed_key % FIELDS.len()].name;
-									res_string.push_str(name);
-								},
-								"FIELD.value" => {
-									let value = FIELDS[hashed_key % FIELDS.len()].values[hashed_key % FIELDS[hashed_key % FIELDS.len()].values.len()];
-									res_string.push_str(value);
-								},
-								"this.id" => {
-									res_string.push_str(id);
-								},
-								"this.id::UUID" | "this.id::UUIDv4" => {
-									res_string.push_str(get_fake_uuidv4(hashed_key).as_str());
-								},
-								"ADJECTIVE" => {
-									res_string.push_str(ADJECTIVES[hashed_key % ADJECTIVES.len()]);
-								},
-								_ => {
-									res_string.push_str(s.as_str());
-								}
+	let val = match datatype {
+		DataTypes::String(expressions) => {
+			let mut res_string = String::new();
+
+			for expression in expressions {
+				match expression {
+					StringExpressions::Literal(s) => {
+						res_string.push_str(&s);
+					},
+					StringExpressions::Range(min, max) => {
+						let val = min + (hashed_key as i64).rem_euclid(max - min);
+						res_string.push_str(&val.to_string());
+					},
+					StringExpressions::Variable(s) => {
+						match s.as_str() {
+							"FULL_NAME" => {
+								res_string.push_str(get_fake_full_name(hashed_key).as_str());
+							},
+							"FIELD.name" => {
+								let name = FIELDS[hashed_key % FIELDS.len()].name;
+								res_string.push_str(name);
+							},
+							"FIELD.value" => {
+								let value = FIELDS[hashed_key % FIELDS.len()].values[hashed_key % FIELDS[hashed_key % FIELDS.len()].values.len()];
+								res_string.push_str(value);
+							},
+							"this.id" => {
+								res_string.push_str(ctx.id.as_ref().map_or("", |f| f.as_str()));
+							},
+							"this.id::UUID" | "this.id::UUIDv4" => {
+								res_string.push_str(get_fake_uuidv4(hashed_key).as_str());
+							},
+							"ADJECTIVE" => {
+								res_string.push_str(ADJECTIVES[hashed_key % ADJECTIVES.len()]);
+							},
+							"ROLE" => {
+								res_string.push_str(get_fake_role(hashed_key));
+							},
+							_ => {
+								res_string.push_str(s.as_str());
 							}
 						}
-						_ => {
-							unreachable!();
-						}
+					},
+					StringExpressions::Date(date) => {
+						use chrono::prelude::*;
+
+						let now = Utc::now();
+
+						let date = match date {
+							Dates::Future => {
+								now + chrono::Duration::days(36 + (hashed_key as i64).rem_euclid(120 - 36))
+							},
+							Dates::Soon => {
+								now + chrono::Duration::days(1 + (hashed_key as i64).rem_euclid(36 - 1))
+							},
+							Dates::Now => { now },
+							Dates::Recent => {
+								now - chrono::Duration::days(1 + (hashed_key as i64).rem_euclid(36 - 1))
+							},
+							Dates::Past => {
+								now - chrono::Duration::days(36 + (hashed_key as i64).rem_euclid(120 - 36))
+							},
+						};
+
+						res_string.push_str(&date.to_rfc3339());
 					}
 				}
-				serde_json::Value::String(res_string)
-			},
-			"Array" => {
-				let mut arr = Vec::new();
+			}
 
-				for tp in &field.builder {
-					match tp {
-						TemplatePieces::Schema(schema_name) => {
-							let schema = schemas.get(schema_name).expect("Schema not found");
-							arr.push(build_object(schemas, schema, id, hashed_key));
+			serde_json::Value::String(res_string)
+		},
+		DataTypes::Array(expression) => {
+			let mut arr = Vec::new();
+
+			for i in 0..16 {
+				let id = format!("{}", i);
+
+				match expression {
+					ObjectExpressions::Schema(schema_name) => {
+						let schema = schemas.get(schema_name).expect("Schema not found");
+						arr.push(serde_json::Value::Object(build_object(schemas, (&schema.fields), &Context{ id: Some(id), seed: hashed_key, size: ctx.size })));
+					},
+					ObjectExpressions::Object(fields) => {
+						arr.push(serde_json::Value::Object(build_object(schemas, &fields, &Context{ id: Some(id), seed: hashed_key, size: ctx.size })));
+					},
+				}
+			}
+
+			serde_json::Value::Array(arr)
+		},
+		DataTypes::Number(expression) => {
+			let mut val = 0;
+
+			match expression {
+				NumberExpressions::Literal(v) => {
+					val = *v;
+				},
+				NumberExpressions::Range(min, max) => {
+					val = min + (hashed_key as i64).rem_euclid(max - min);
+				},
+				NumberExpressions::Variable(s) => {
+					match s.as_str() {
+						"this.id" => {
+							val = hashed_key as i64;
 						},
 						_ => {
-							unreachable!();
+							val = s.parse::<i64>().unwrap();
 						}
 					}
 				}
-
-				serde_json::Value::Array(arr)
-			},
-			_ => {
-				unreachable!();
 			}
-		};
 
-		obj.insert(field.name.clone(), val);
-	});
+			serde_json::Value::Number(serde_json::Number::from(val))
+		}
+		DataTypes::Object(expression) => {
+			let obj = match expression {
+				ObjectExpressions::Object(fields) => {
+					build_object(schemas, &fields, ctx)
+				},
+				ObjectExpressions::Schema(schema_name) => {
+					let schema = schemas.get(schema_name).expect("Schema not found");
+					build_object(schemas, &schema.fields, ctx)
+				},
+			};
 
-	serde_json::Value::Object(obj)
+			serde_json::Value::Object(obj)
+		},
+		DataTypes::Null => serde_json::Value::Null,
+	};
+
+	val
+}
+
+fn build_object(schemas: &HashMap<String, Schema>, (fields): &(Vec<Field>), ctx: &Context) -> serde_json::value::Map<String, serde_json::Value> {
+	let hashed_key = if let Some(id) = ctx.id.as_ref() {
+		let mut hasher = std::collections::hash_map::DefaultHasher::new();
+		id.hash(&mut hasher);
+		(hasher.finish() as usize).wrapping_add(ctx.seed)
+	} else {
+		ctx.seed
+	};
+
+	let mut obj = serde_json::value::Map::new();
+
+	for field in fields {
+		obj.insert(field.name.clone(), build_value(schemas, &field.datatype, &Context{ id: ctx.id.to_owned(), seed: hashed_key, size: ctx.size }));
+	}
+
+	obj
 }
 
 fn ingest_data(source: &serde_json::Value) -> (HashMap<String, Route>, HashMap<String, Schema>) {
-	let mut routes = HashMap::<String, Route>::new();
-
-	ingest_routes(&source, &mut routes, "".to_string());
+	let routes = ingest_routes(&source);
 	let schemas = ingest_schemas(&source);
 
 	(routes, schemas)
+}
+
+fn ingest_schema(source: &serde_json::Map<String, serde_json::Value>) -> Vec<Field> {
+	let jfields = source.get("fields").unwrap().as_object().unwrap();
+
+	let mut fields = Vec::new();
+
+	for (field_name, field) in jfields {
+		if let serde_json::Value::Object(field) = field {
+			if let Some(serde_json::Value::String(template)) = field.get("template") {
+				fields.push(Field {
+					name: field_name.to_string(),
+					datatype: DataTypes::String(parse_template(template.as_str())),
+				});
+			}
+
+			if let Some(serde_json::Value::Object(range)) = field.get("range") {
+				if let (Some(serde_json::Value::Number(min)), Some(serde_json::Value::Number(max))) = (range.get("min"), range.get("max")) {
+					fields.push(Field {
+						name: field_name.to_string(),
+						datatype: DataTypes::Number(NumberExpressions::Range(min.as_i64().unwrap(), max.as_i64().unwrap())),
+					});
+				}
+			}
+
+			if let Some(serde_json::Value::Object(date)) = field.get("date") {
+				let frame = if let Some(serde_json::Value::String(frame)) = date.get("frame") {
+					frame.as_str()
+				} else {
+					"now"
+				};
+
+				let frame = match frame {
+					"now" => Dates::Now,
+					"future" => Dates::Future,
+					"soon" => Dates::Soon,
+					"recent" => Dates::Recent,
+					"past" => Dates::Past,
+					_ => Dates::Now,
+				};
+
+				fields.push(Field {
+					name: field_name.to_string(),
+					datatype: DataTypes::String(vec![StringExpressions::Date(frame)]),
+				});
+			};
+
+			if let Some(serde_json::Value::Object(items)) = field.get("items") {
+				if let Some(serde_json::Value::String(schema)) = items.get("schema") {
+					fields.push(Field {
+						name: field_name.to_string(),
+						datatype: DataTypes::Array(ObjectExpressions::Schema(schema.to_string())),
+					});
+				}
+			}
+
+			if let Some(serde_json::Value::Object(_)) = field.get("fields") {
+				let sub_fields = ingest_schema(field);
+				fields.push(Field {
+					name: field_name.to_string(),
+					datatype: DataTypes::Object(ObjectExpressions::Object(sub_fields)),
+				});
+			}
+		}
+	}
+
+	fields
 }
 
 fn ingest_schemas(source: &serde_json::Value) -> HashMap<String, Schema> {
@@ -229,32 +436,14 @@ fn ingest_schemas(source: &serde_json::Value) -> HashMap<String, Schema> {
 
 	if let Some(serde_json::Value::Object(jschemas)) = source.get("schemas") {
     	for (name, schema) in jschemas {
-     		let jfields = schema.get("fields").unwrap().as_object().unwrap();
-			let mut fields = Vec::new();
-			for (field_name, field) in jfields {
-				if let Some(serde_json::Value::String(template)) = field.get("template") {
-					fields.push(Field {
-						name: field_name.to_string(),
-						ty: "String".to_string(),
-						builder: parse_template(template.as_str()),
-					});
-				}
+     		if let serde_json::Value::Object(schema) = schema {
+     			let fields = ingest_schema(schema);
 
-				if let Some(serde_json::Value::Object(items)) = field.get("items") {
-					if let Some(serde_json::Value::String(schema)) = items.get("schema") {
-						fields.push(Field {
-							name: field_name.to_string(),
-							ty: "Array".to_string(),
-							builder: vec![TemplatePieces::Schema(schema.to_string())],
-						});
-					}
-				}
-			}
-
-			schemas.insert(name.to_string(), Schema {
-				name: name.to_string(),
-				fields,
-			});
+				schemas.insert(name.to_string(), Schema {
+					name: name.to_string(),
+					fields,
+				});
+       		}
      	}
     }
 
@@ -262,40 +451,41 @@ fn ingest_schemas(source: &serde_json::Value) -> HashMap<String, Schema> {
 }
 
 fn main() {
-	let data_path = std::env::args().nth(1).expect("No data file provided");
+	let data_path = std::env::args().nth(1).expect("No data file path was provided");
 
-	let data = std::fs::read_to_string(data_path).unwrap();
+	let data = std::fs::read_to_string(data_path).expect("Failed to read data file");
 
     let source = serde_json5::from_str::<serde_json::Value>(&data).unwrap();
 
     let (routes, schemas) = ingest_data(&source);
 
-	let scale = 16;
-	let seed: usize = 0;
+	let scale = std::env::args().nth(2).map(|scale| scale.parse::<usize>().unwrap()).unwrap_or(16);
+	let seed = std::env::args().nth(3).map(|seed| seed.parse::<usize>().unwrap()).unwrap_or(0);
 
 	let mut app = Server::new();
 
-	for (route_name, route) in routes {
-		let datatype_name = route.response.split("[").collect::<Vec<&str>>()[0].to_string();
-		let is_array = route.response.ends_with("[]");
+	// Put routes that contain colons at the end
+	let mut routes = routes.into_iter().collect::<Vec<_>>();
+	routes.sort_by(|(a, _), (b, _)| {
+        let a_has_colon = a.split('/').last().unwrap_or("").contains(':');
+        let b_has_colon = b.split('/').last().unwrap_or("").contains(':');
 
+        if a_has_colon == b_has_colon {
+            std::cmp::Ordering::Equal
+        } else if a_has_colon {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Less
+        }
+    });
+
+	for (route_name, route) in routes {
 		let schemas = schemas.clone();
-		let datatype_name = datatype_name.clone();
 
 		app.get(&route_name, move |req, res| {
-			let key = req.parameter("id").unwrap_or("-1").to_string();
+			let id = req.parameter("id").map(|id| id.to_string());
 
-			let schema = schemas.get(&datatype_name).unwrap();
-
-			let rsp = if is_array {
-				let mut arr = Vec::new();
-				for i in 0..scale {
-					arr.push(build_object(&schemas, &schema, &format!("{}", i), seed));
-				}
-				serde_json::Value::Array(arr)
-			} else {
-				build_object(&schemas, &schema, &key, seed)
-			};
+			let rsp = build_value(&schemas, &route.response, &Context{ id, seed, size: scale });
 
 			res.json(&rsp)
 		});
@@ -305,11 +495,42 @@ fn main() {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum TemplatePieces {
-	String(String),
+enum Dates {
+	Future,
+	Soon,
+	Now,
+	Recent,
+	Past,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum StringExpressions {
+	Literal(String),
 	Variable(String),
 	Range(i64, i64),
+	Date(Dates),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum NumberExpressions {
+	Literal(i64),
+	Range(i64, i64),
+	Variable(String),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum ObjectExpressions {
+	Object(Vec<Field>),
 	Schema(String),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum DataTypes {
+	String(Vec<StringExpressions>),
+	Number(NumberExpressions),
+	Object(ObjectExpressions),
+	Array(ObjectExpressions),
+	Null,
 }
 
 fn scan_until<'a>(s: &'a str, m: &'a str) -> (&'a str, &'a str) {
@@ -323,7 +544,7 @@ fn scan_until<'a>(s: &'a str, m: &'a str) -> (&'a str, &'a str) {
 	(&s, "")
 }
 
-fn parse_template(template: &str) -> Vec<TemplatePieces> {
+fn parse_template(template: &str) -> Vec<StringExpressions> {
 	let mut result = Vec::new();
 	let mut start = template;
 
@@ -335,15 +556,15 @@ fn parse_template(template: &str) -> Vec<TemplatePieces> {
 				let range = variable.split("..").collect::<Vec<&str>>();
 				let min = range[0].parse::<i64>().unwrap();
 				let max = range[1].parse::<i64>().unwrap();
-				result.push(TemplatePieces::Range(min, max));
+				result.push(StringExpressions::Range(min, max));
 			} else {
-				result.push(TemplatePieces::Variable(variable.to_string()));
+				result.push(StringExpressions::Variable(variable.to_string()));
 			}
 
 			start = &rest[1..];
 		} else {
 			let (chunk, rest) = scan_until(start, "${");
-			result.push(TemplatePieces::String(chunk.to_string()));
+			result.push(StringExpressions::Literal(chunk.to_string()));
 			start = rest;
 		}
 	}
@@ -368,6 +589,15 @@ mod tests {
 				Campaign: {
 					id: "${this.id::UUID}",
 					name: "My ${ADJECTIVE} campaign",
+					start: { date: { frame: "recent" } },
+					end: { date: { frame: "future" } },
+					stats: {
+						fields: {
+							batch: { range: { min: 1, max: 10 } },
+							commited: { range: { min: 1, max: 10 } },
+							total: { range: { min: 1, max: 10 } },
+						},
+					},
 				},
 			},
 			routes: {
@@ -398,35 +628,180 @@ mod tests {
 	}
 
 	#[test]
+	fn test_ingest_routes() {
+		const STRING: &str = r#"
+		{
+			schemas: {
+				Person: {
+					id: "${this.id::UUID}",
+					name: "${faker.person.fullName}",
+					risk: "${1..100}",
+				},
+			},
+			routes: {
+				"/people": {
+					response: { schema: "Person[]", },
+					routes: {
+						"/:id": {
+							response: { schema: "Person", },
+						},
+						"/positions": {
+							response: { schema: { items: { schema: { fields: { name: { template: "Teller" } } } } } },
+						},
+					},
+				},
+			}
+		}
+		"#;
+
+		let values: serde_json::Value = serde_json5::from_str(STRING).unwrap();
+
+		let routes = ingest_routes(&values);
+
+		{
+			let people = routes.get("/people").unwrap();
+			assert_eq!(people.response, DataTypes::Array(ObjectExpressions::Schema("Person".to_string())));
+
+			{
+				let people_id = routes.get("/people/:id").unwrap();
+				assert_eq!(people_id.response, DataTypes::Object(ObjectExpressions::Schema("Person".to_string())));
+			}
+
+			{
+				let people_positions = routes.get("/people/positions").unwrap();
+				assert_eq!(people_positions.response, DataTypes::Array(ObjectExpressions::Object(vec![Field {
+					name: "name".to_string(),
+					datatype: DataTypes::String(vec![StringExpressions::Literal("Teller".to_string())]),
+				}])));
+			}
+		}
+	}
+
+	#[test]
+	fn test_ingest_schemas() {
+		{
+			let source = r#"
+			{
+				schemas: {
+					Field: {
+						fields: {
+							name: { template: "${FIELD.name}" },
+							value: { template: "${FIELD.value}" },
+						},
+					},
+					Person: {
+						fields: {
+							id: { template: "${this.id::UUID}", },
+							name: { template: "${FULL_NAME}" },
+							risk: { range: { min: 1, max: 100, }, },
+							fields: { items: { schema: "Field" } },
+						},
+					},
+					Campaign: {
+						fields: {
+							id: { template: "${this.id::UUID}", },
+							name: { template: "My ${ADJECTIVE} campaign", },
+							start: { date: { frame: "recent" } },
+							end: { date: { frame: "future" } },
+							stats: {
+								fields: {
+									batch: { range: { min: 1, max: 10 } },
+									commited: { range: { min: 1, max: 10 } },
+									total: { range: { min: 1, max: 10 } },
+								},
+							},
+						},
+					},
+				}
+			}"#;
+
+			let source = serde_json5::from_str::<serde_json::Value>(source).unwrap();
+
+			let schemas = ingest_schemas(&source);
+
+			assert_eq!(schemas.len(), 3);
+
+			{
+				let field = schemas.get("Field").unwrap();
+
+				let name_field = field.fields.iter().find(|f| f.name == "name").unwrap();
+				assert_eq!(name_field.datatype, DataTypes::String(vec![StringExpressions::Variable("FIELD.name".to_string())]));
+
+				let value_field = field.fields.iter().find(|f| f.name == "value").unwrap();
+				assert_eq!(value_field.datatype, DataTypes::String(vec![StringExpressions::Variable("FIELD.value".to_string())]));
+			}
+
+			{
+				let person = schemas.get("Person").unwrap();
+
+				let id_field = person.fields.iter().find(|f| f.name == "id").unwrap();
+				assert_eq!(id_field.datatype, DataTypes::String(vec![StringExpressions::Variable("this.id::UUID".to_string())]));
+
+				let name_field = person.fields.iter().find(|f| f.name == "name").unwrap();
+				assert_eq!(name_field.datatype, DataTypes::String(vec![StringExpressions::Variable("FULL_NAME".to_string())]));
+
+				let risk_field = person.fields.iter().find(|f| f.name == "risk").unwrap();
+				assert_eq!(risk_field.datatype, DataTypes::Number(NumberExpressions::Range(1, 100)));
+
+				let fields_field = person.fields.iter().find(|f| f.name == "fields").unwrap();
+				assert_eq!(fields_field.datatype, DataTypes::Array(ObjectExpressions::Schema("Field".to_string())));
+			}
+
+			{
+				let campaign = schemas.get("Campaign").unwrap();
+
+				let id_field = campaign.fields.iter().find(|f| f.name == "id").unwrap();
+				assert_eq!(id_field.datatype, DataTypes::String(vec![StringExpressions::Variable("this.id::UUID".to_string())]));
+
+				let name_field = campaign.fields.iter().find(|f| f.name == "name").unwrap();
+				assert_eq!(name_field.datatype, DataTypes::String(vec![StringExpressions::Literal("My ".to_string()), StringExpressions::Variable("ADJECTIVE".to_string()), StringExpressions::Literal(" campaign".to_string())]));
+
+				let start_field = campaign.fields.iter().find(|f| f.name == "start").unwrap();
+				assert_eq!(start_field.datatype, DataTypes::String(vec![StringExpressions::Date(Dates::Recent)]));
+
+				let end_field = campaign.fields.iter().find(|f| f.name == "end").unwrap();
+				assert_eq!(end_field.datatype, DataTypes::String(vec![StringExpressions::Date(Dates::Future)]));
+
+				let stats_field = campaign.fields.iter().find(|f| f.name == "stats").unwrap();
+				assert_eq!(stats_field.datatype, DataTypes::Object(ObjectExpressions::Object(vec![
+					Field{ name: "batch".to_string(), datatype: DataTypes::Number(NumberExpressions::Range(1, 10)) },
+					Field{ name: "commited".to_string(), datatype: DataTypes::Number(NumberExpressions::Range(1, 10)) },
+						Field{ name: "total".to_string(), datatype: DataTypes::Number(NumberExpressions::Range(1, 10)) },
+				])));
+			}
+		}
+	}
+
+	#[test]
 	fn parse_range_generator() {
 		{
 			let template = "${1..100}";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::Range(1, 100)]);
+			assert_eq!(result, vec![StringExpressions::Range(1, 100)]);
 		}
 
 		{
 			let template = "My age is ${1..100}";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::String("My age is ".to_string()), TemplatePieces::Range(1, 100)]);
+			assert_eq!(result, vec![StringExpressions::Literal("My age is ".to_string()), StringExpressions::Range(1, 100)]);
 		}
 
 		{
 			let template = "${1..100} years old";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::Range(1, 100), TemplatePieces::String(" years old".to_string())]);
+			assert_eq!(result, vec![StringExpressions::Range(1, 100), StringExpressions::Literal(" years old".to_string())]);
 		}
 
 		{
 			let template = "${0..50}${50..100}";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::Range(0, 50), TemplatePieces::Range(50, 100)]);
+			assert_eq!(result, vec![StringExpressions::Range(0, 50), StringExpressions::Range(50, 100)]);
 		}
 
 		{
 			let template = "${0..50} ${50..100}";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::Range(0, 50), TemplatePieces::String(" ".to_string()), TemplatePieces::Range(50, 100)]);
+			assert_eq!(result, vec![StringExpressions::Range(0, 50), StringExpressions::Literal(" ".to_string()), StringExpressions::Range(50, 100)]);
 		}
 	}
 
@@ -435,25 +810,25 @@ mod tests {
 		{
 			let template = "${this.id::UUID}";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::Variable("this.id::UUID".to_string())]);
+			assert_eq!(result, vec![StringExpressions::Variable("this.id::UUID".to_string())]);
 		}
 
 		{
 			let template = "My name is ${faker.person.fullName}";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::String("My name is ".to_string()), TemplatePieces::Variable("faker.person.fullName".to_string())]);
+			assert_eq!(result, vec![StringExpressions::Literal("My name is ".to_string()), StringExpressions::Variable("faker.person.fullName".to_string())]);
 		}
 
 		{
 			let template = "${faker.person.fullName} years old";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::Variable("faker.person.fullName".to_string()), TemplatePieces::String(" years old".to_string())]);
+			assert_eq!(result, vec![StringExpressions::Variable("faker.person.fullName".to_string()), StringExpressions::Literal(" years old".to_string())]);
 		}
 
 		{
 			let template = "${faker.person.fullName} ${faker.person.fullName}";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::Variable("faker.person.fullName".to_string()), TemplatePieces::String(" ".to_string()), TemplatePieces::Variable("faker.person.fullName".to_string())]);
+			assert_eq!(result, vec![StringExpressions::Variable("faker.person.fullName".to_string()), StringExpressions::Literal(" ".to_string()), StringExpressions::Variable("faker.person.fullName".to_string())]);
 		}
 	}
 
@@ -463,11 +838,11 @@ mod tests {
 			let template = "My name is ${faker.person.fullName} and I am ${1..100} years old";
 			let result = parse_template(template);
 			assert_eq!(result, vec![
-				TemplatePieces::String("My name is ".to_string()),
-				TemplatePieces::Variable("faker.person.fullName".to_string()),
-				TemplatePieces::String(" and I am ".to_string()),
-				TemplatePieces::Range(1, 100),
-				TemplatePieces::String(" years old".to_string()),
+				StringExpressions::Literal("My name is ".to_string()),
+				StringExpressions::Variable("faker.person.fullName".to_string()),
+				StringExpressions::Literal(" and I am ".to_string()),
+				StringExpressions::Range(1, 100),
+				StringExpressions::Literal(" years old".to_string()),
 			]);
 		}
 
@@ -475,11 +850,11 @@ mod tests {
 			let template = "${1..100} ${faker.person.fullName} ${1..100}";
 			let result = parse_template(template);
 			assert_eq!(result, vec![
-				TemplatePieces::Range(1, 100),
-				TemplatePieces::String(" ".to_string()),
-				TemplatePieces::Variable("faker.person.fullName".to_string()),
-				TemplatePieces::String(" ".to_string()),
-				TemplatePieces::Range(1, 100),
+				StringExpressions::Range(1, 100),
+				StringExpressions::Literal(" ".to_string()),
+				StringExpressions::Variable("faker.person.fullName".to_string()),
+				StringExpressions::Literal(" ".to_string()),
+				StringExpressions::Range(1, 100),
 			]);
 		}
 	}
@@ -489,7 +864,7 @@ mod tests {
 		{
 			let template = "My name is John";
 			let result = parse_template(template);
-			assert_eq!(result, vec![TemplatePieces::String("My name is John".to_string())]);
+			assert_eq!(result, vec![StringExpressions::Literal("My name is John".to_string())]);
 		}
 	}
 }

@@ -5,9 +5,11 @@ WORKDIR /usr/src/moquist
 COPY . .
 RUN cargo install --path .
 
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
-RUN apt update && rm -rf /var/lib/apt/lists/*
+LABEL org.opencontainers.image.source="https://github.com/Netnix-SA/moquist"
+
+RUN apt update && rm -rf /var/lib/apt/lists/* && apt install libc6 -y
 COPY --from=builder /usr/local/cargo/bin/moquist /usr/local/bin/moquist
 
 ENTRYPOINT ["moquist"]
