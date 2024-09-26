@@ -277,6 +277,10 @@ fn build_value(schemas: &HashMap<String, Schema>, datatype: &DataTypes, ctx: &Co
 
 			serde_json::Value::String(res_string)
 		},
+		DataTypes::Enum(values) => {
+			let val = hashed_key % values.len();
+			serde_json::Value::String(values[val].clone())
+		},
 		DataTypes::Array(expression) => {
 			let mut arr = Vec::new();
 
@@ -425,6 +429,21 @@ fn ingest_schema(source: &serde_json::Map<String, serde_json::Value>) -> Vec<Fie
 					datatype: DataTypes::Object(ObjectExpressions::Object(sub_fields)),
 				});
 			}
+
+			if let Some(serde_json::Value::Array(values)) = field.get("enum") {
+				let mut enum_values = Vec::new();
+
+				for value in values {
+					if let serde_json::Value::String(value) = value {
+						enum_values.push(value.to_string());
+					}
+				}
+
+				fields.push(Field {
+					name: field_name.to_string(),
+					datatype: DataTypes::Enum(enum_values),
+				});
+			}
 		}
 	}
 
@@ -530,6 +549,7 @@ enum DataTypes {
 	Number(NumberExpressions),
 	Object(ObjectExpressions),
 	Array(ObjectExpressions),
+	Enum(Vec<String>),
 	Null,
 }
 
@@ -695,6 +715,7 @@ mod tests {
 							name: { template: "${FULL_NAME}" },
 							risk: { range: { min: 1, max: 100, }, },
 							fields: { items: { schema: "Field" } },
+							title: { enum: ["Mr", "Mrs", "Ms", "Dr"] },
 						},
 					},
 					Campaign: {
@@ -745,6 +766,9 @@ mod tests {
 
 				let fields_field = person.fields.iter().find(|f| f.name == "fields").unwrap();
 				assert_eq!(fields_field.datatype, DataTypes::Array(ObjectExpressions::Schema("Field".to_string())));
+
+				let title_field = person.fields.iter().find(|f| f.name == "title").unwrap();
+				assert_eq!(title_field.datatype, DataTypes::Enum(vec!["Mr".to_string(), "Mrs".to_string(), "Ms".to_string(), "Dr".to_string()]));
 			}
 
 			{
