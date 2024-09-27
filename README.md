@@ -40,7 +40,7 @@ The Dockerfile entrypoint is the `moquist` command, so you can pass any argument
 
 Moquist uses [`json5`](https://json5.org/) for its configuration files, so you can use comments and other niceties.
 
-### Schemas
+## Schemas
 Schemas are the building blocks of your API. They define the structure of your data.
 
 To start defining them create the top-level `schemas` key in your configuration file.
@@ -85,11 +85,18 @@ Inside the `fields` object, you will then define the fields of your schema.
 }
 ```
 
-#### Fields
+### Fields
 
 Fields can have different types of definitions, like `template` or `range`.
 
-##### Template
+Any non-object fields will be treated as literals of that same type.
+
+```json5
+name: "John Doe", // Literal, will always be "John Doe"
+age: 25, // Literal, will always be 25
+```
+
+#### Template
 
 The `template` field is a string that can contain variables that will be replaced by their values.
 This field will always produce a string.
@@ -99,6 +106,34 @@ This field will always produce a string.
 presentation: { template: "My name is ${FULL_NAME}" },
 ```
 
+##### Templates
+
+###### Variables
+
+- `FULL_NAME`: A persons full name.
+- `FIRST_NAME`: A persons first name.
+- `LAST_NAME`: A persons last name.
+- `PHONE_NUMBER`: A random phone number.
+- `EMAIL`: A random email address.
+- `ADDRESS`: A random address.
+- `ADJECTIVE`: A random adjective.
+- `NOUN`: A random noun.
+- `VERB`: A random verb.
+
+###### Ranges
+
+- `a..b`: A random number between `a` and `b`.
+
+###### Special values
+
+- `this.id`: The current object's id. Usually taken from the route parameter or the array index. Of type string.
+
+###### Casts
+
+Some values can be cast to other formats by using the `::` operator.
+
+- `this.id::UUIDv4`: The current object's id as a UUIDv4.
+
 ##### Range
 
 The `range` field is an object that defines a range of (numeric) values.
@@ -106,6 +141,12 @@ This field will always produce a number.
 
 ```json5
 age: { range: { min: 18, max: 99 } },
+```
+
+Or you can use an array.
+
+```json5
+age: { range: [18, 99] }, // Equivalent to the previous example
 ```
 
 The min and max values are inclusive.
@@ -117,6 +158,12 @@ This field will always produce a value from the array.
 
 ```json5
 prefixes: { enum: ["Mr.", "Mrs.", "Ms.", "Dr."] },
+```
+
+Or
+
+```json5
+prefixes: { values: ["Mr.", "Mrs.", "Ms.", "Dr."] },
 ```
 
 ##### Nested objects
@@ -165,7 +212,7 @@ Person: {
 },
 ```
 
-### Routes
+## Routes
 
 Routes are the paths that your API will respond to.
 
