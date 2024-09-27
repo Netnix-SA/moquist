@@ -3,6 +3,9 @@ FROM rust:1.81.0 AS builder
 WORKDIR /usr/src/moquist
 
 COPY . .
+
+RUN cargo test
+
 RUN cargo install --path .
 
 FROM debian:bookworm-slim
