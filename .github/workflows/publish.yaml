@@ -33,14 +33,14 @@ jobs:
       - name: Lowercase the repository name
         id: lower
         run: |
-          echo "IMAGE=${${{ env.REGISTRY }}@L}" >> $GITHUB_OUTPUT
+          echo "repository=${"${{ env.IMAGE_NAME }}",,}"
       - name: Build and push Docker image
         id: push
         uses: docker/build-push-action@v6.9.0
         with:
           context: .
           push: true
-          tags: ${{ steps.lower.outputs.IMAGE }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ env.REGISTRY }}/${{ steps.lower.outputs.repository }}:latest
           # tags: ${{ steps.meta.outputs.tags }}
           # labels: ${{ steps.meta.outputs.labels }}
       - name: Generate artifact attestation
