@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{schemas::ingest_schema, values::{DataTypes, ObjectExpressions},};
+use crate::{schemas::ingest_schema, values::{ArrayExpressions, DataTypes, ObjectExpressions},};
 
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -16,7 +16,7 @@ pub fn ingest_routes(value: &serde_json::Value) -> HashMap<String, Route> {
 					Some(serde_json::Value::String(response)) => {
 						if response.contains("[]") {
 							let response = response.replace("[]", "");
-							DataTypes::Array(ObjectExpressions::Schema(response))
+							DataTypes::Array(ArrayExpressions::Generated(Box::new(DataTypes::Object(ObjectExpressions::Schema(response)))))
 						} else {
 							DataTypes::Object(ObjectExpressions::Schema(response.clone()))
 						}
@@ -26,7 +26,7 @@ pub fn ingest_routes(value: &serde_json::Value) -> HashMap<String, Route> {
 							Some(serde_json::Value::String(response)) => {
 								if response.contains("[]") {
 									let response = response.replace("[]", "");
-									DataTypes::Array(ObjectExpressions::Schema(response))
+									DataTypes::Array(ArrayExpressions::Generated(Box::new(DataTypes::Object(ObjectExpressions::Schema(response)))))
 								} else {
 									DataTypes::Object(ObjectExpressions::Schema(response.clone()))
 								}
@@ -34,7 +34,7 @@ pub fn ingest_routes(value: &serde_json::Value) -> HashMap<String, Route> {
 							Some(serde_json::Value::Object(schema)) => {
 								if let Some(serde_json::Value::Object(items)) = schema.get("items") {
 									if let Some(serde_json::Value::Object(schema)) = items.get("schema") {
-										DataTypes::Array(ObjectExpressions::Object(ingest_schema(schema)))
+										DataTypes::Array(ArrayExpressions::Generated(Box::new(DataTypes::Object(ObjectExpressions::Object(ingest_schema(schema))))))
 									} else {
 										DataTypes::Null
 									}
@@ -92,7 +92,7 @@ mod tests {
 							response: { schema: "Person", },
 						},
 						"/positions": {
-							response: { schema: { items: { schema: { fields: { name: { template: "Teller" } } } } } },
+							response: { schema: { items: { schema: { fields: { name: "Teller" } } } } },
 						},
 					},
 				},
@@ -106,7 +106,7 @@ mod tests {
 
 		{
 			let people = routes.get("/people").unwrap();
-			assert_eq!(people.response, DataTypes::Array(ObjectExpressions::Schema("Person".to_string())));
+			assert_eq!(people.response, DataTypes::Array(ArrayExpressions::Generated(Box::new(DataTypes::Object(ObjectExpressions::Schema("Person".to_string()))))));
 
 			{
 				let people_id = routes.get("/people/:id").unwrap();
@@ -115,10 +115,10 @@ mod tests {
 
 			{
 				let people_positions = routes.get("/people/positions").unwrap();
-				assert_eq!(people_positions.response, DataTypes::Array(ObjectExpressions::Object(vec![Field {
+				assert_eq!(people_positions.response, DataTypes::Array(ArrayExpressions::Generated(Box::new(DataTypes::Object(ObjectExpressions::Object(vec![Field {
 					name: "name".to_string(),
-					datatype: DataTypes::String(vec![StringExpressions::Literal("Teller".to_string())]),
-				}])));
+					datatype: DataTypes::String(StringExpressions::Literal("Teller".to_string())),
+				}]))))));
 			}
 		}
 	}
